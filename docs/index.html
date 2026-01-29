@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>공영장례 스크래퍼 모니터링</title>
+    <script src="https://cdn.jsdelivr.net/npm/pocketbase@0.21.1/dist/pocketbase.umd.min.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        h1 { text-align: center; margin-bottom: 30px; color: #00d4ff; }
+
+        /* 로그인 */
+        .login-box {
+            max-width: 400px;
+            margin: 100px auto;
+            background: #16213e;
+            padding: 30px;
+            border-radius: 10px;
+        }
+        .login-box input {
+            width: 100%;
+            padding: 12px;
+            margin: 10px 0;
+            border: none;
+            border-radius: 5px;
+            background: #1a1a2e;
+            color: #fff;
+        }
+        .login-box button {
+            width: 100%;
+            padding: 12px;
+            background: #00d4ff;
+            border: none;
+            border-radius: 5px;
+            color: #000;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        .login-box button:hover { background: #00b8e6; }
+
+        /* 대시보드 */
+        .dashboard { display: none; }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .stat-card {
+            background: #16213e;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+        }
+        .stat-card .number {
+            font-size: 2.5em;
+            font-weight: bold;
+            color: #00d4ff;
+        }
+        .stat-card .label { color: #888; margin-top: 5px; }
+        .stat-card.warning .number { color: #ff6b6b; }
+        .stat-card.success .number { color: #51cf66; }
+
+        /* 테이블 */
+        .section {
+            background: #16213e;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .section h2 {
+            margin-bottom: 15px;
+            color: #00d4ff;
+            font-size: 1.2em;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            padding: 10px;
+            text-align: left;
+            border-bottom: 1px solid #333;
+        }
+        th { color: #888; font-weight: normal; }
+        tr:hover { background: #1a1a2e; }
+
+        .badge {
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 0.8em;
+        }
+        .badge-info { background: #00d4ff22; color: #00d4ff; }
+        .badge-error { background: #ff6b6b22; color: #ff6b6b; }
+        .badge-success { background: #51cf6622; color: #51cf66; }
+
+        .refresh-btn {
+            background: #333;
+            border: none;
+            color: #fff;
+            padding: 8px 16px;
+            border-radius: 5px;
+            cursor: pointer;
+            float: right;
+        }
+        .refresh-btn:hover { background: #444; }
+
+        .loading { text-align: center; padding: 20px; color: #666; }
+        .error { color: #ff6b6b; text-align: center; padding: 10px; }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .logout-btn {
+            background: #ff6b6b;
+            border: none;
+            color: #fff;
+            padding: 8px 16px;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+
+        .time-ago { color: #666; font-size: 0.9em; }
+
+        /* 클릭 가능한 행 */
+        tr.clickable { cursor: pointer; }
+        tr.clickable:hover { background: #252550; }
+
+        /* 모달 */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(0,0,0,0.8);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal.show { display: flex; }
+        .modal-content {
+            background: #16213e;
+            padding: 25px;
+            border-radius: 10px;
+            max-width: 600px;
+            width: 90%;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            border-bottom: 1px solid #333;
+            padding-bottom: 10px;
+        }
+        .modal-header h3 { color: #00d4ff; margin: 0; }
+        .modal-close {
+            background: none;
+            border: none;
+            color: #888;
+            font-size: 24px;
+            cursor: pointer;
+        }
+        .modal-close:hover { color: #fff; }
+        .detail-row {
+            display: flex;
+            padding: 8px 0;
+            border-bottom: 1px solid #333;
+        }
+        .detail-label {
+            width: 100px;
+            color: #888;
+            flex-shrink: 0;
+        }
+        .detail-value {
+            flex: 1;
+            word-break: break-all;
+        }
+        .detail-value a { color: #00d4ff; }
+        .error-trace {
+            background: #1a1a2e;
+            padding: 10px;
+            border-radius: 5px;
+            font-family: monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- 로그인 -->
+        <div class="login-box" id="loginBox">
+            <h2 style="text-align:center; margin-bottom:20px;">모니터링 로그인</h2>
+            <input type="email" id="email" placeholder="이메일">
+            <input type="password" id="password" placeholder="비밀번호">
+            <button onclick="login()">로그인</button>
+            <p id="loginError" class="error" style="margin-top:10px;"></p>
+        </div>
+
+        <!-- 대시보드 -->
+        <div class="dashboard" id="dashboard">
+            <div class="header">
+                <h1>공영장례 스크래퍼 모니터링</h1>
+                <button class="logout-btn" onclick="logout()">로그아웃</button>
+            </div>
+
+            <!-- 통계 카드 -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="number" id="rawCount">-</div>
+                    <div class="label">RAW 데이터</div>
+                </div>
+                <div class="stat-card">
+                    <div class="number" id="analyzedCount">-</div>
+                    <div class="label">분석 완료</div>
+                </div>
+                <div class="stat-card">
+                    <div class="number" id="sentCount">-</div>
+                    <div class="label">전송 완료</div>
+                </div>
+                <div class="stat-card" id="unanalyzedCard">
+                    <div class="number" id="unanalyzedCount">-</div>
+                    <div class="label">미분석</div>
+                </div>
+                <div class="stat-card" id="unsentCard">
+                    <div class="number" id="unsentCount">-</div>
+                    <div class="label">미전송</div>
+                </div>
+            </div>
+
+            <!-- 최근 로그 -->
+            <div class="section">
+                <h2>최근 로그 <button class="refresh-btn" onclick="loadLogs()">새로고침</button></h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>시간</th>
+                            <th>레벨</th>
+                            <th>메시지</th>
+                        </tr>
+                    </thead>
+                    <tbody id="logsTable">
+                        <tr><td colspan="3" class="loading">로딩 중...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- 최근 부고 -->
+            <div class="section">
+                <h2>최근 부고 <button class="refresh-btn" onclick="loadFunerals()">새로고침</button></h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>구청</th>
+                            <th>이름</th>
+                            <th>발인일시</th>
+                            <th>분석일</th>
+                        </tr>
+                    </thead>
+                    <tbody id="funeralsTable">
+                        <tr><td colspan="4" class="loading">로딩 중...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- 구청별 현황 -->
+            <div class="section">
+                <h2>구청별 현황</h2>
+                <div id="districtStats" class="loading">로딩 중...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 상세 정보 모달 -->
+    <div class="modal" id="detailModal" onclick="closeModal(event)">
+        <div class="modal-content" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <h3 id="modalTitle">상세 정보</h3>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div id="modalBody"></div>
+        </div>
+    </div>
+
+    <script>
+        const PB_URL = 'https://public-funeral-api.bapc.kr';
+        const pb = new PocketBase(PB_URL);
+
+        // 데이터 저장 (상세보기용)
+        let logsData = [];
+        let funeralsData = [];
+
+        // 페이지 로드 시 세션 확인
+        window.onload = () => {
+            if (pb.authStore.isValid) {
+                showDashboard();
+            }
+        };
+
+        async function login() {
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            const errorEl = document.getElementById('loginError');
+
+            try {
+                await pb.collection('users').authWithPassword(email, password);
+                showDashboard();
+            } catch (e) {
+                errorEl.textContent = '로그인 실패: ' + e.message;
+            }
+        }
+
+        function logout() {
+            pb.authStore.clear();
+            document.getElementById('loginBox').style.display = 'block';
+            document.getElementById('dashboard').style.display = 'none';
+        }
+
+        async function showDashboard() {
+            document.getElementById('loginBox').style.display = 'none';
+            document.getElementById('dashboard').style.display = 'block';
+
+            await Promise.all([
+                loadStats(),
+                loadLogs(),
+                loadFunerals(),
+                loadDistrictStats()
+            ]);
+        }
+
+        async function loadStats() {
+            try {
+                // 전체 카운트 조회
+                const [raw, analyzed, sent] = await Promise.all([
+                    pb.collection('funeral_raw').getList(1, 1),
+                    pb.collection('funeral_analyzed').getList(1, 1),
+                    pb.collection('funeral_sent').getList(1, 1)
+                ]);
+
+                document.getElementById('rawCount').textContent = raw.totalItems;
+                document.getElementById('analyzedCount').textContent = analyzed.totalItems;
+                document.getElementById('sentCount').textContent = sent.totalItems;
+
+                // 미분석/미전송 계산
+                const unanalyzed = raw.totalItems - analyzed.totalItems;
+                const unsent = analyzed.totalItems - sent.totalItems;
+
+                document.getElementById('unanalyzedCount').textContent = Math.max(0, unanalyzed);
+                document.getElementById('unsentCount').textContent = Math.max(0, unsent);
+
+                // 경고 표시
+                const unanalyzedCard = document.getElementById('unanalyzedCard');
+                const unsentCard = document.getElementById('unsentCard');
+
+                if (unanalyzed > 10) unanalyzedCard.classList.add('warning');
+                else unanalyzedCard.classList.remove('warning');
+
+                if (unsent > 10) unsentCard.classList.add('warning');
+                else unsentCard.classList.remove('warning');
+
+            } catch (e) {
+                console.error('Stats error:', e);
+            }
+        }
+
+        async function loadLogs() {
+            const tbody = document.getElementById('logsTable');
+            tbody.innerHTML = '<tr><td colspan="3" class="loading">로딩 중...</td></tr>';
+
+            try {
+                const logs = await pb.collection('scraper_log').getList(1, 20, {
+                    sort: '-created'
+                });
+
+                if (logs.items.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="3" class="loading">로그 없음</td></tr>';
+                    return;
+                }
+
+                logsData = logs.items;
+                tbody.innerHTML = logs.items.map((log, idx) => `
+                    <tr class="clickable" onclick="showLogDetail(${idx})">
+                        <td class="time-ago">${formatTime(log.created)}</td>
+                        <td><span class="badge ${log.level === 'ERROR' ? 'badge-error' : 'badge-info'}">${log.level}</span></td>
+                        <td>${escapeHtml(log.message || log.function_name || '-')}</td>
+                    </tr>
+                `).join('');
+            } catch (e) {
+                tbody.innerHTML = `<tr><td colspan="3" class="error">${e.message}</td></tr>`;
+            }
+        }
+
+        async function loadFunerals() {
+            const tbody = document.getElementById('funeralsTable');
+            tbody.innerHTML = '<tr><td colspan="4" class="loading">로딩 중...</td></tr>';
+
+            try {
+                const funerals = await pb.collection('funeral_analyzed').getList(1, 15, {
+                    sort: '-created'
+                });
+
+                if (funerals.items.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" class="loading">데이터 없음</td></tr>';
+                    return;
+                }
+
+                funeralsData = funerals.items;
+                tbody.innerHTML = funerals.items.map((f, idx) => `
+                    <tr class="clickable" onclick="showFuneralDetail(${idx})">
+                        <td>${escapeHtml(f.district)}</td>
+                        <td>${escapeHtml(f.name || '-')}</td>
+                        <td>${escapeHtml(f.departure_datetime || '-')}</td>
+                        <td class="time-ago">${formatTime(f.created)}</td>
+                    </tr>
+                `).join('');
+            } catch (e) {
+                tbody.innerHTML = `<tr><td colspan="4" class="error">${e.message}</td></tr>`;
+            }
+        }
+
+        async function loadDistrictStats() {
+            const container = document.getElementById('districtStats');
+
+            try {
+                const raw = await pb.collection('funeral_raw').getFullList({
+                    fields: 'district'
+                });
+
+                // 구청별 카운트
+                const counts = {};
+                raw.forEach(r => {
+                    counts[r.district] = (counts[r.district] || 0) + 1;
+                });
+
+                // 정렬
+                const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+
+                container.innerHTML = `
+                    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr)); gap:10px;">
+                        ${sorted.map(([district, count]) => `
+                            <div style="background:#1a1a2e; padding:10px; border-radius:5px; text-align:center;">
+                                <div style="font-size:1.5em; color:#00d4ff;">${count}</div>
+                                <div style="color:#888; font-size:0.9em;">${district}</div>
+                            </div>
+                        `).join('')}
+                    </div>
+                `;
+            } catch (e) {
+                container.innerHTML = `<p class="error">${e.message}</p>`;
+            }
+        }
+
+        function formatTime(dateStr) {
+            const date = new Date(dateStr);
+            const now = new Date();
+            const diff = (now - date) / 1000;
+
+            if (diff < 60) return '방금 전';
+            if (diff < 3600) return Math.floor(diff / 60) + '분 전';
+            if (diff < 86400) return Math.floor(diff / 3600) + '시간 전';
+
+            return date.toLocaleString('ko-KR', {
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+        }
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return str.replace(/[&<>"']/g, m => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;',
+                '"': '&quot;', "'": '&#39;'
+            }[m]));
+        }
+
+        // 모달 함수
+        function showLogDetail(idx) {
+            const log = logsData[idx];
+            if (!log) return;
+
+            document.getElementById('modalTitle').textContent = '로그 상세';
+            document.getElementById('modalBody').innerHTML = `
+                <div class="detail-row">
+                    <span class="detail-label">시간</span>
+                    <span class="detail-value">${new Date(log.created).toLocaleString('ko-KR')}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">레벨</span>
+                    <span class="detail-value"><span class="badge ${log.level === 'ERROR' ? 'badge-error' : 'badge-info'}">${log.level}</span></span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">함수명</span>
+                    <span class="detail-value">${escapeHtml(log.function_name || '-')}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">메시지</span>
+                    <span class="detail-value">${escapeHtml(log.message || '-')}</span>
+                </div>
+                ${log.error_trace ? `
+                <div style="margin-top:15px;">
+                    <div style="color:#888; margin-bottom:5px;">에러 트레이스:</div>
+                    <div class="error-trace">${escapeHtml(log.error_trace)}</div>
+                </div>
+                ` : ''}
+            `;
+            document.getElementById('detailModal').classList.add('show');
+        }
+
+        function showFuneralDetail(idx) {
+            const f = funeralsData[idx];
+            if (!f) return;
+
+            const fields = [
+                ['구청', f.district],
+                ['이름', f.name],
+                ['생년월일', f.birth_date],
+                ['거주지', f.residence],
+                ['사망일시', f.death_datetime],
+                ['사망장소', f.death_place],
+                ['장례일정', f.funeral_schedule],
+                ['장례장소', f.funeral_place],
+                ['발인일시', f.departure_datetime],
+                ['화장일시', f.cremation_datetime],
+                ['분석일시', new Date(f.created).toLocaleString('ko-KR')]
+            ];
+
+            document.getElementById('modalTitle').textContent = '부고 상세';
+            document.getElementById('modalBody').innerHTML = `
+                ${fields.map(([label, value]) => `
+                    <div class="detail-row">
+                        <span class="detail-label">${label}</span>
+                        <span class="detail-value">${escapeHtml(value || '-')}</span>
+                    </div>
+                `).join('')}
+                ${f.url ? `
+                <div style="margin-top:15px;">
+                    <a href="${escapeHtml(f.url)}" target="_blank" style="color:#00d4ff;">원본 링크 열기</a>
+                </div>
+                ` : ''}
+            `;
+            document.getElementById('detailModal').classList.add('show');
+        }
+
+        function closeModal(event) {
+            if (!event || event.target.classList.contains('modal')) {
+                document.getElementById('detailModal').classList.remove('show');
+            }
+        }
+
+        // ESC 키로 모달 닫기
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeModal();
+        });
+
+        // 5초마다 자동 새로고침
+        setInterval(() => {
+            if (pb.authStore.isValid) {
+                loadStats();
+                loadLogs();
+            }
+        }, 5000);
+    </script>
+</body>
+</html>

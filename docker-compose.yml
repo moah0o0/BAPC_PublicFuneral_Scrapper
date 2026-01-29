@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  scraper:
+    build: .
+    container_name: funeral-scraper
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Seoul
+    # 로그 설정
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

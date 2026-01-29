@@ -1,0 +1,34 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.venv
+venv
+ENV
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Local files
+.env
+.env.local
+*.log
+
+# Docs (GitHub Pages)
+docs/
+
+# Mac
+.DS_Store
+
+# Claude
+.claude/
