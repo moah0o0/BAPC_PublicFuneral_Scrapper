@@ -200,6 +200,37 @@
             max-height: 300px;
             overflow-y: auto;
         }
+
+        /* 페이지네이션 */
+        .pagination {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 10px;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #333;
+        }
+        .pagination button {
+            background: #333;
+            border: none;
+            color: #fff;
+            padding: 8px 14px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .pagination button:hover:not(:disabled) { background: #444; }
+        .pagination button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+        .pagination .page-info {
+            color: #888;
+            font-size: 14px;
+            min-width: 100px;
+            text-align: center;
+        }
     </style>
 </head>
 <body>
@@ -246,7 +277,7 @@
 
             <!-- 최근 로그 -->
             <div class="section">
-                <h2>최근 로그 <button class="refresh-btn" onclick="loadLogs()">새로고침</button></h2>
+                <h2>로그 <button class="refresh-btn" onclick="loadLogs()">새로고침</button></h2>
                 <table>
                     <thead>
                         <tr>
@@ -259,11 +290,12 @@
                         <tr><td colspan="3" class="loading">로딩 중...</td></tr>
                     </tbody>
                 </table>
+                <div class="pagination" id="logsPagination"></div>
             </div>
 
             <!-- 최근 부고 -->
             <div class="section">
-                <h2>최근 부고 <button class="refresh-btn" onclick="loadFunerals()">새로고침</button></h2>
+                <h2>부고 목록 <button class="refresh-btn" onclick="loadFunerals()">새로고침</button></h2>
                 <table>
                     <thead>
                         <tr>
@@ -277,6 +309,27 @@
                         <tr><td colspan="4" class="loading">로딩 중...</td></tr>
                     </tbody>
                 </table>
+                <div class="pagination" id="funeralsPagination"></div>
+            </div>
+
+            <!-- 실행 메트릭 -->
+            <div class="section">
+                <h2>실행 메트릭 <button class="refresh-btn" onclick="loadMetrics()">새로고침</button></h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>시간</th>
+                            <th>함수</th>
+                            <th>실행시간</th>
+                            <th>메모리</th>
+                            <th>상태</th>
+                        </tr>
+                    </thead>
+                    <tbody id="metricsTable">
+                        <tr><td colspan="5" class="loading">로딩 중...</td></tr>
+                    </tbody>
+                </table>
+                <div class="pagination" id="metricsPagination"></div>
             </div>
 
             <!-- 구청별 현황 -->
@@ -301,10 +354,17 @@
     <script>
         const PB_URL = 'https://public-funeral-api.bapc.kr';
         const pb = new PocketBase(PB_URL);
+        const PER_PAGE = 20;
 
         // 데이터 저장 (상세보기용)
         let logsData = [];
         let funeralsData = [];
+        let metricsData = [];
+
+        // 페이지네이션 상태
+        let logsPage = 1, logsTotalPages = 1;
+        let funeralsPage = 1, funeralsTotalPages = 1;
+        let metricsPage = 1, metricsTotalPages = 1;
 
         // 페이지 로드 시 세션 확인
         window.onload = () => {
@@ -340,6 +400,7 @@
                 loadStats(),
                 loadLogs(),
                 loadFunerals(),
+                loadMetrics(),
                 loadDistrictStats()
             ]);
         }
@@ -379,18 +440,23 @@
             }
         }
 
-        async function loadLogs() {
+        async function loadLogs(page = logsPage) {
             const tbody = document.getElementById('logsTable');
+            const pagination = document.getElementById('logsPagination');
             tbody.innerHTML = '<tr><td colspan="3" class="loading">로딩 중...</td></tr>';
 
             try {
-                const logs = await pb.collection('scraper_log').getList(1, 20, {
+                const logs = await pb.collection('scraper_log').getList(page, PER_PAGE, {
                     sort: '-created',
                     $autoCancel: false
                 });
 
+                logsPage = page;
+                logsTotalPages = logs.totalPages;
+
                 if (logs.items.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="3" class="loading">로그 없음</td></tr>';
+                    pagination.innerHTML = '';
                     return;
                 }
 
@@ -402,23 +468,31 @@
                         <td>${escapeHtml(log.message || log.function_name || '-')}</td>
                     </tr>
                 `).join('');
+
+                pagination.innerHTML = renderPagination(logsPage, logsTotalPages, logs.totalItems, 'loadLogs');
             } catch (e) {
                 tbody.innerHTML = `<tr><td colspan="3" class="error">${e.message}</td></tr>`;
+                pagination.innerHTML = '';
             }
         }
 
-        async function loadFunerals() {
+        async function loadFunerals(page = funeralsPage) {
             const tbody = document.getElementById('funeralsTable');
+            const pagination = document.getElementById('funeralsPagination');
             tbody.innerHTML = '<tr><td colspan="4" class="loading">로딩 중...</td></tr>';
 
             try {
-                const funerals = await pb.collection('funeral_analyzed').getList(1, 15, {
+                const funerals = await pb.collection('funeral_analyzed').getList(page, PER_PAGE, {
                     sort: '-created',
                     $autoCancel: false
                 });
 
+                funeralsPage = page;
+                funeralsTotalPages = funerals.totalPages;
+
                 if (funerals.items.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="4" class="loading">데이터 없음</td></tr>';
+                    pagination.innerHTML = '';
                     return;
                 }
 
@@ -431,8 +505,49 @@
                         <td class="time-ago">${formatTime(f.created)}</td>
                     </tr>
                 `).join('');
+
+                pagination.innerHTML = renderPagination(funeralsPage, funeralsTotalPages, funerals.totalItems, 'loadFunerals');
             } catch (e) {
                 tbody.innerHTML = `<tr><td colspan="4" class="error">${e.message}</td></tr>`;
+                pagination.innerHTML = '';
+            }
+        }
+
+        async function loadMetrics(page = metricsPage) {
+            const tbody = document.getElementById('metricsTable');
+            const pagination = document.getElementById('metricsPagination');
+            tbody.innerHTML = '<tr><td colspan="5" class="loading">로딩 중...</td></tr>';
+
+            try {
+                const metrics = await pb.collection('scraper_metrics').getList(page, PER_PAGE, {
+                    sort: '-created',
+                    $autoCancel: false
+                });
+
+                metricsPage = page;
+                metricsTotalPages = metrics.totalPages;
+
+                if (metrics.items.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" class="loading">메트릭 없음</td></tr>';
+                    pagination.innerHTML = '';
+                    return;
+                }
+
+                metricsData = metrics.items;
+                tbody.innerHTML = metrics.items.map((m, idx) => `
+                    <tr class="clickable" onclick="showMetricDetail(${idx})">
+                        <td class="time-ago">${formatTime(m.created)}</td>
+                        <td>${escapeHtml(m.function_name || '-')}</td>
+                        <td>${m.execution_time_ms ? m.execution_time_ms.toFixed(0) + 'ms' : '-'}</td>
+                        <td>${m.memory_used_mb ? m.memory_used_mb.toFixed(1) + 'MB' : '-'}</td>
+                        <td><span class="badge ${m.success ? 'badge-success' : 'badge-error'}">${m.success ? '성공' : '실패'}</span></td>
+                    </tr>
+                `).join('');
+
+                pagination.innerHTML = renderPagination(metricsPage, metricsTotalPages, metrics.totalItems, 'loadMetrics');
+            } catch (e) {
+                tbody.innerHTML = `<tr><td colspan="5" class="error">${e.message}</td></tr>`;
+                pagination.innerHTML = '';
             }
         }
 
@@ -467,6 +582,17 @@
             } catch (e) {
                 container.innerHTML = `<p class="error">${e.message}</p>`;
             }
+        }
+
+        function renderPagination(currentPage, totalPages, totalItems, loadFn) {
+            if (totalPages <= 1) return '';
+            return `
+                <button onclick="${loadFn}(1)" ${currentPage === 1 ? 'disabled' : ''}>≪</button>
+                <button onclick="${loadFn}(${currentPage - 1})" ${currentPage === 1 ? 'disabled' : ''}>◀</button>
+                <span class="page-info">${currentPage} / ${totalPages} (${totalItems}건)</span>
+                <button onclick="${loadFn}(${currentPage + 1})" ${currentPage === totalPages ? 'disabled' : ''}>▶</button>
+                <button onclick="${loadFn}(${totalPages})" ${currentPage === totalPages ? 'disabled' : ''}>≫</button>
+            `;
         }
 
         function formatTime(dateStr) {
@@ -562,6 +688,37 @@
             document.getElementById('detailModal').classList.add('show');
         }
 
+        function showMetricDetail(idx) {
+            const m = metricsData[idx];
+            if (!m) return;
+
+            const fields = [
+                ['시간', new Date(m.created).toLocaleString('ko-KR')],
+                ['함수명', m.function_name],
+                ['실행시간', m.execution_time_ms ? m.execution_time_ms.toFixed(2) + 'ms' : '-'],
+                ['메모리', m.memory_used_mb ? m.memory_used_mb.toFixed(2) + 'MB' : '-'],
+                ['상태', m.success ? '성공' : '실패'],
+                ['처리건수', m.items_processed || '-']
+            ];
+
+            document.getElementById('modalTitle').textContent = '메트릭 상세';
+            document.getElementById('modalBody').innerHTML = `
+                ${fields.map(([label, value]) => `
+                    <div class="detail-row">
+                        <span class="detail-label">${label}</span>
+                        <span class="detail-value">${escapeHtml(String(value || '-'))}</span>
+                    </div>
+                `).join('')}
+                ${m.error_message ? `
+                <div style="margin-top:15px;">
+                    <div style="color:#888; margin-bottom:5px;">에러 메시지:</div>
+                    <div class="error-trace">${escapeHtml(m.error_message)}</div>
+                </div>
+                ` : ''}
+            `;
+            document.getElementById('detailModal').classList.add('show');
+        }
+
         function closeModal(event) {
             if (!event || event.target.classList.contains('modal')) {
                 document.getElementById('detailModal').classList.remove('show');
@@ -573,11 +730,10 @@
             if (e.key === 'Escape') closeModal();
         });
 
-        // 5초마다 자동 새로고침
+        // 5초마다 자동 새로고침 (통계만, 페이지네이션은 유지)
         setInterval(() => {
             if (pb.authStore.isValid) {
                 loadStats();
-                loadLogs();
             }
         }, 5000);
     </script>
