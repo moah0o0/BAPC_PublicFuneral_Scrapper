@@ -475,6 +475,8 @@ class PocketbaseClient:
         error_trace: Optional[str] = None
     ) -> Optional[Dict]:
         """로그 저장"""
+        if error_trace and len(error_trace) > 5000:
+            error_trace = error_trace[:4990] + "\n...(잘림)"
         return self._request(
             "POST",
             "scraper_log/records",
