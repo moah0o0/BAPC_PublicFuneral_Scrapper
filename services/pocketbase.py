@@ -5,7 +5,7 @@ DB 작업 추상화
 
 import hashlib
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional, Any
+from typing import Callable, Dict, List, Optional, Any
 import logging
 import requests
 
@@ -32,6 +32,23 @@ class PocketbaseClient:
         self.email = config.email
         self.password = config.password
         self.token: Optional[str] = None
+        self._on_error: Optional[Callable[[str, str], None]] = None
+        self._notified_errors: set = set()  # 중복 알림 방지
+
+    def set_error_callback(self, callback: Callable[[str, str], None]):
+        """에러 발생 시 호출할 콜백 설정 (텔레그램 등)
+        callback(endpoint, error_message)
+        """
+        self._on_error = callback
+
+    def _notify_error(self, endpoint: str, error_msg: str):
+        """에러 콜백 호출 (동일 endpoint는 한 번만)"""
+        if self._on_error and endpoint not in self._notified_errors:
+            self._notified_errors.add(endpoint)
+            try:
+                self._on_error(endpoint, error_msg)
+            except Exception:
+                pass  # 콜백 실패는 무시
 
     def authenticate(self) -> bool:
         """User 인증 (is_scrapper 권한 필요)"""
@@ -95,19 +112,26 @@ class PocketbaseClient:
             except Exception:
                 response_body = e.response.text[:500] if e.response.text else None
 
-            if e.response.status_code in (401, 403) or (
-                e.response.status_code == 400 and not _retried
-                and response_body and isinstance(response_body, dict)
-                and "rule" in str(response_body.get("message", "")).lower()
-            ):
-                # 토큰 만료 또는 인증 관련 rule 실패 - 재인증 시도
-                logger.warning(f"인증 관련 오류 감지 (HTTP {e.response.status_code}), 재인증 시도...")
+            # API rule 실패 감지: data가 비어있으면 필드 검증이 아닌 권한 문제
+            is_auth_issue = e.response.status_code in (401, 403)
+            is_api_rule_failure = (
+                e.response.status_code == 400
+                and isinstance(response_body, dict)
+                and not response_body.get("data")  # 빈 data = API rule 실패
+            )
+
+            if not _retried and (is_auth_issue or is_api_rule_failure):
+                logger.warning(f"인증/API rule 오류 감지 (HTTP {e.response.status_code}), 재인증 시도...")
+                self.token = None  # 토큰 강제 초기화
                 if self.authenticate():
                     return self._request(method, endpoint, data, params, _retried=True)
 
-            logger.error(f"Pocketbase 요청 실패: {e} | 응답: {response_body}")
+            error_detail = f"HTTP {e.response.status_code} | 응답: {response_body}"
+            self._notify_error(endpoint, error_detail)
+            logger.error(f"Pocketbase 요청 실패: {e} | 응답: {response_body} | 요청 데이터 키: {list(data.keys()) if data else None}")
             return None
         except Exception as e:
+            self._notify_error(endpoint, str(e))
             logger.error(f"Pocketbase 요청 오류: {e}")
             return None
 
