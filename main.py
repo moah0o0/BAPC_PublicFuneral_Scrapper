@@ -40,6 +40,16 @@ def create_pipeline(config) -> Pipeline:
     gpt = GPTAnalyzer(config.openai_api_key)
     scraper_logger = get_logger(config)
 
+    # Pocketbase 에러 시 텔레그램 알림
+    def _pb_error_callback(endpoint: str, error_msg: str):
+        telegram.send_error_notification(
+            function_name="PocketbaseClient",
+            error_message=f"[{endpoint}] {error_msg}",
+            uuid_code="pb_request_error",
+            add_text="Pocketbase 요청 실패"
+        )
+    db.set_error_callback(_pb_error_callback)
+
     # Pocketbase 인증
     if not db.authenticate():
         logging.warning("Pocketbase 인증 실패 - DB 저장이 작동하지 않을 수 있습니다")
