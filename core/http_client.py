@@ -1,12 +1,13 @@
 """
 HTTP 클라이언트
 직접 연결 우선, 차단 시 Tor 폴백 및 헤더 동적 생성 적용
-IP 변경 확인을 위한 로깅 기능 포함
+IP 변경 확인을 위한 로깅 기능 및 Tor 회로 갱신 지원
 """
 
 import requests
 import time
 import random
+import socket
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from urllib3 import disable_warnings
@@ -22,11 +23,12 @@ from random_user_agent.params import SoftwareName, OperatingSystem
 try:
     from config import Config
 except ImportError:
-    # 테스트를 위한 가상 Config 클래스
     class Config:
         class Tor:
             enabled = True
             proxies = {'http': 'socks5h://127.0.0.1:9050', 'https': 'socks5h://127.0.0.1:9050'}
+            control_port = 9051  # Tor 컨트롤 포트 추가
+            password = None      # Tor 컨트롤 비밀번호
         tor = Tor()
 
 disable_warnings(InsecureRequestWarning)
@@ -53,11 +55,11 @@ class HttpClient:
     기능:
     1. 요청 전후 IP 로깅 (Tor 전환 확인)
     2. 매 요청마다 User-Agent와 Referer를 새롭게 생성
-    3. 직접 연결 시도 후 차단 시 Tor 폴백
+    3. 직접 연결 시도 후 차단 시 Tor 폴백 및 회로 갱신 시도
     """
 
     BLOCKED_STATUS_CODES = {403, 429, 503}
-    IP_CHECK_URL = "https://api.ipify.org" # IP 확인을 위한 신뢰할 수 있는 API
+    IP_CHECK_URL = "https://api.ipify.org"
 
     def __init__(self, config: Config):
         self.config = config
@@ -72,7 +74,7 @@ class HttpClient:
         """기본 세션 설정"""
         session = requests.Session()
         retry = Retry(
-            total=3,
+            total=2,
             backoff_factor=1,
             status_forcelist=[500, 502, 504],
         )
@@ -87,17 +89,29 @@ class HttpClient:
             "Connection": "keep-alive",
             "Upgrade-Insecure-Requests": "1",
             "Sec-Ch-Ua-Mobile": "?0",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
         })
         return session
+
+    def _renew_tor_circuit(self):
+        """Tor 회로를 갱신하여 새로운 IP 요청 (컨트롤 포트 필요)"""
+        if not hasattr(self.tor_config, 'control_port'):
+            return
+        
+        try:
+            with socket.create_connection(("127.0.0.1", self.tor_config.control_port)) as s:
+                auth_cmd = f'AUTHENTICATE "{self.tor_config.password or ""}"\r\n'
+                s.send(auth_cmd.encode())
+                s.recv(1024)
+                s.send(b"SIGNAL NEWNYM\r\n")
+                s.recv(1024)
+                logger.info("Tor 회로 갱신 신호를 보냈습니다. (NEWNYM)")
+                time.sleep(2) # IP가 실제로 바뀌기 위한 대기시간
+        except Exception as e:
+            logger.debug(f"Tor 회로 갱신 실패 (컨트롤 포트 미설정 등): {e}")
 
     def _get_current_ip(self, proxies: Optional[Dict] = None) -> str:
         """현재 외부 노출 IP 주소 조회"""
         try:
-            # 타임아웃을 짧게 설정하여 IP 확인 지연 방지
             resp = requests.get(self.IP_CHECK_URL, proxies=proxies, timeout=10, verify=False)
             return resp.text.strip()
         except Exception as e:
@@ -107,10 +121,12 @@ class HttpClient:
     def _get_fresh_headers(self, url: str) -> Dict[str, str]:
         """매 요청마다 새로운 브라우저 정체성 생성"""
         parsed_url = urlparse(url)
+        ua = get_random_user_agent()
         return {
-            "User-Agent": get_random_user_agent(),
+            "User-Agent": ua,
             "Referer": f"{parsed_url.scheme}://{parsed_url.netloc}/",
             "Host": parsed_url.netloc,
+            "Origin": f"{parsed_url.scheme}://{parsed_url.netloc}",
         }
 
     def _apply_headers(self, url: str, kwargs: dict):
@@ -137,7 +153,6 @@ class HttpClient:
             if self.tor_config.enabled and (isinstance(e, requests.exceptions.ConnectionError) or self._is_blocked(e)):
                 reason = "차단 감지" if isinstance(e, requests.exceptions.HTTPError) else "연결 실패"
                 logger.warning(f"GET {reason}, Tor 폴백 실행: {url}")
-                time.sleep(random.uniform(1.0, 3.0))
                 return self._get_with_tor(url, 'GET', **kwargs)
             raise
 
@@ -158,7 +173,6 @@ class HttpClient:
             if self.tor_config.enabled and (isinstance(e, requests.exceptions.ConnectionError) or self._is_blocked(e)):
                 reason = "차단 감지" if isinstance(e, requests.exceptions.HTTPError) else "연결 실패"
                 logger.warning(f"POST {reason}, Tor 폴백 실행: {url}")
-                time.sleep(random.uniform(1.0, 3.0))
                 return self._get_with_tor(url, 'POST', data=data, params=params, **kwargs)
             raise
 
@@ -166,34 +180,38 @@ class HttpClient:
         """차단 여부 판단"""
         return error.response is not None and error.response.status_code in self.BLOCKED_STATUS_CODES
 
-    def _get_with_tor(self, url: str, method: str, data: Optional[Dict] = None, params: Optional[Dict] = None, **kwargs) -> requests.Response:
-        """Tor 프록시를 통한 요청 수행 및 IP 변경 확인 로깅"""
+    def _get_with_tor(self, url: str, method: str, data: Optional[Dict] = None, params: Optional[Dict] = None, retry_count: int = 0, **kwargs) -> requests.Response:
+        """Tor 프록시를 통한 요청 수행 및 실패 시 회로 갱신 재시도"""
         kwargs['proxies'] = self.tor_config.proxies
         kwargs['timeout'] = max(kwargs.get('timeout', 30), 60)
         
-        # 1. 토르 적용 전 IP 확인 (초기 IP와 다를 수 있으므로 재확인 가능하나, 보통은 self.origin_ip 사용)
-        before_ip = self.origin_ip
-        
-        # 2. 토르 세션 정화
+        # 세션 초기화 및 헤더 갱신
         self.session.cookies.clear()
         self._apply_headers(url, kwargs)
         kwargs['headers']['Sec-Fetch-Site'] = 'same-origin'
+        kwargs['headers']['Sec-Fetch-Mode'] = 'navigate'
 
-        # 3. 토르 적용 후 IP 확인 (로깅 목적)
+        # IP 로깅
         after_ip = self._get_current_ip(proxies=self.tor_config.proxies)
+        logger.info(f"[IP 변경 확인] 원본 IP: {self.origin_ip} -> Tor IP: {after_ip} (시도 {retry_count + 1})")
         
-        logger.info(f"[IP 변경 확인] 원본 IP: {before_ip} -> Tor IP: {after_ip}")
-        
-        if after_ip == before_ip and after_ip != "Unknown":
-            logger.error("경고: Tor 프록시를 설정했으나 IP가 변경되지 않았습니다!")
-
-        if method == 'GET':
-            response = self.session.get(url, **kwargs)
-        else:
-            response = self.session.post(url, data=data, params=params, **kwargs)
+        try:
+            if method == 'GET':
+                response = self.session.get(url, **kwargs)
+            else:
+                response = self.session.post(url, data=data, params=params, **kwargs)
             
-        response.raise_for_status()
-        return response
+            response.raise_for_status()
+            return response
+
+        except requests.exceptions.HTTPError as e:
+            # Tor IP도 차단된 경우 (403), 회로를 갱신하고 최대 1회 재시도
+            if self._is_blocked(e) and retry_count < 1:
+                logger.warning(f"Tor IP({after_ip})도 차단됨. 회로 갱신 후 재시도합니다.")
+                self._renew_tor_circuit()
+                time.sleep(random.uniform(2.0, 5.0))
+                return self._get_with_tor(url, method, data=data, params=params, retry_count=retry_count + 1, **kwargs)
+            raise
 
     def get_text(self, url: str, encoding: str = "utf-8", **kwargs) -> str:
         """GET 요청 후 텍스트 반환"""
