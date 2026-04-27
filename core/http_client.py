@@ -4,6 +4,8 @@ HTTP 클라이언트
 """
 
 import requests
+import time
+import random
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from urllib3 import disable_warnings
@@ -64,12 +66,20 @@ class HttpClient:
         session.mount('http://', adapter)
         session.mount('https://', adapter)
 
-        # 공통 기본 헤더
+        # 공통 기본 헤더 (브라우저와 유사하게 설정)
         session.headers.update({
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
             "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept-Encoding": "gzip, deflate, br",
             "Connection": "keep-alive",
             "Upgrade-Insecure-Requests": "1",
+            "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
         })
 
         return session
@@ -77,11 +87,12 @@ class HttpClient:
     def _get_fresh_headers(self, url: str) -> Dict[str, str]:
         """매 요청마다 새로운 브라우저 정체성(UA, Referer) 생성"""
         parsed_url = urlparse(url)
-        return {
+        headers = {
             "User-Agent": get_random_user_agent(),
             "Referer": f"{parsed_url.scheme}://{parsed_url.netloc}/",
-            "Host": parsed_url.netloc
+            "Host": parsed_url.netloc,
         }
+        return headers
 
     def _apply_headers(self, url: str, kwargs: dict):
         """요청 직전 헤더 병합"""
@@ -112,13 +123,15 @@ class HttpClient:
 
         except requests.exceptions.HTTPError as e:
             if self._is_blocked(e) and self.tor_config.enabled:
-                logger.warning(f"GET 차단 감지 ({e.response.status_code}), Tor로 재시도: {url}")
+                logger.warning(f"GET 차단 감지 ({e.response.status_code}), 잠시 후 Tor로 재시도: {url}")
+                time.sleep(random.uniform(2.0, 5.0))  # 인간적인 지연 시간 추가
                 return self._get_with_tor(url, 'GET', **kwargs)
             raise
 
         except requests.exceptions.ConnectionError:
             if self.tor_config.enabled:
-                logger.warning(f"GET 연결 실패, Tor로 재시도: {url}")
+                logger.warning(f"GET 연결 실패, 잠시 후 Tor로 재시도: {url}")
+                time.sleep(random.uniform(1.0, 3.0))
                 return self._get_with_tor(url, 'GET', **kwargs)
             raise
 
@@ -146,13 +159,15 @@ class HttpClient:
 
         except requests.exceptions.HTTPError as e:
             if self._is_blocked(e) and self.tor_config.enabled:
-                logger.warning(f"POST 차단 감지 ({e.response.status_code}), Tor로 재시도: {url}")
+                logger.warning(f"POST 차단 감지 ({e.response.status_code}), 잠시 후 Tor로 재시도: {url}")
+                time.sleep(random.uniform(2.0, 5.0))  # 즉시 재시도하지 않고 지연 발생
                 return self._get_with_tor(url, 'POST', data=data, params=params, **kwargs)
             raise
 
         except requests.exceptions.ConnectionError:
             if self.tor_config.enabled:
-                logger.warning(f"POST 연결 실패, Tor로 재시도: {url}")
+                logger.warning(f"POST 연결 실패, 잠시 후 Tor로 재시도: {url}")
+                time.sleep(random.uniform(1.0, 3.0))
                 return self._get_with_tor(url, 'POST', data=data, params=params, **kwargs)
             raise
 
@@ -177,8 +192,10 @@ class HttpClient:
         # 차단된 기존 쿠키가 Tor IP를 오염시키지 않도록 쿠키 제거
         self.session.cookies.clear()
         
-        # 다시 한번 신선한 UA 적용 (재시도 시 신분 세탁)
+        # 재시도 시 완전히 새로운 신분(Headers)으로 위장
         self._apply_headers(url, kwargs)
+        # Tor 환경이므로 Referer를 Same-origin으로 좀 더 명확히 설정
+        kwargs['headers']['Sec-Fetch-Site'] = 'same-origin'
 
         if method == 'GET':
             response = self.session.get(url, **kwargs)
