@@ -10,8 +10,8 @@ services:
     environment:
       - TZ=Asia/Seoul
       - TOR_ENABLED=true
-      - TOR_HOST=tor  # ← localhost 대신 tor 서비스명 사용
-      - TOR_PORT=9050
+      - TOR_HOST=tor
+      - TOR_PORT=9150  # ← 9050에서 9150으로 변경
     env_file:
       - .env
     logging:
@@ -24,5 +24,5 @@ services:
     image: peterdavehello/tor-socks-proxy:latest
     container_name: funeral-tor
     ports:
-      - "9050:9050"
+      - "9150:9150"  # ← 9050:9050에서 9150:9150으로 변경
     restart: unless-stopped
