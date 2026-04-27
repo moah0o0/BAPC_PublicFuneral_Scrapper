@@ -4,14 +4,25 @@ services:
   scraper:
     build: .
     container_name: funeral-scraper
+    depends_on:
+      - tor
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
       - TZ=Asia/Seoul
-    # 로그 설정
+      - TOR_ENABLED=true
+      - TOR_HOST=tor  # ← localhost 대신 tor 서비스명 사용
+      - TOR_PORT=9050
+    env_file:
+      - .env
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
+
+  tor:
+    image: peterdavehello/tor-socks-proxy:latest
+    container_name: funeral-tor
+    ports:
+      - "9050:9050"
+    restart: unless-stopped
