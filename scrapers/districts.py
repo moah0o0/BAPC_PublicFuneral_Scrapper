@@ -733,6 +733,7 @@ class JungguScraper(BaseScraper):
 # ==================== 스크래퍼 팩토리 ====================
 
 SCRAPER_CLASSES = {
+    "YEONJE": YeonjeScraper,
     "BUKGU": BukguScraper,
     "DONGGU": DongguScraper,
     "DONGNAE": DongnaeScraper,
@@ -745,13 +746,13 @@ SCRAPER_CLASSES = {
     "NAMGU": NamguScraper,
     "SAHA": SahaScraper,
     "SASANG": SasangScraper,
-    "SEOGU": SeoguScraper,
     "SUYEONG": SuyeongScraper,
     "YEONGDOGU": YeongdoguScraper,
-    "YEONJE": YeonjeScraper,
+    "SEOGU": SeoguScraper
 }
 
 DISTRICT_KOREAN_NAMES = {
+    "YEONJE": "연제구",
     "BUKGU": "북구",
     "DONGGU": "동구",
     "DONGNAE": "동래구",
@@ -764,10 +765,9 @@ DISTRICT_KOREAN_NAMES = {
     "NAMGU": "남구",
     "SAHA": "사하구",
     "SASANG": "사상구",
-    "SEOGU": "서구",
     "SUYEONG": "수영구",
     "YEONGDOGU": "영도구",
-    "YEONJE": "연제구",
+    "SEOGU": "서구"
 }
 
 
