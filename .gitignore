@@ -44,3 +44,7 @@ Thumbs.db
 
 # Claude
 .claude/
+
+# Runtime log dumps
+log.txt
+logscrapper.txt

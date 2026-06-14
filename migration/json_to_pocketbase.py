@@ -199,6 +199,8 @@ def migrate_sent_data(db: PocketbaseClient, base_dir: Path) -> int:
 
     for i, content_hash in enumerate(to_migrate):
         result = db.mark_as_sent(content_hash)
+        # 전송 dedup의 단일 진실원천(analyzed.is_sent)도 함께 갱신
+        db.mark_analyzed_sent_by_hash(content_hash)
         if result:
             count += 1
         else:

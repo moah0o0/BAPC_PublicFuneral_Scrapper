@@ -239,31 +239,53 @@ class PocketbaseClient:
 
         return hashes
 
-    def get_unanalyzed_raw(self) -> List[Dict]:
-        """분석되지 않은 원본 데이터 조회 (페이지네이션)"""
+    def _fetch_all_pages(self, endpoint: str, params: Optional[Dict] = None) -> Optional[List[Dict]]:
+        """페이지네이션 전체 조회 (fail-closed).
+
+        요청이 한 번이라도 실패하면 None을 반환한다.
+        호출부는 None을 '조회 실패'로 간주하고, 절대 '데이터 없음'으로 오인하지 말 것.
+        (빈 컬렉션은 [] 로 정상 반환된다)
+        """
+        params = dict(params or {})
+        params.setdefault("perPage", 500)
+        items: List[Dict] = []
+        page = 1
+        while True:
+            params["page"] = page
+            result = self._request("GET", endpoint, params=params)
+            if result is None:  # 요청 실패 → fail-closed
+                logger.error(f"전체 조회 실패(fail-closed): {endpoint} page={page}")
+                return None
+            items.extend(result.get("items", []))
+            if page >= result.get("totalPages", 1):
+                break
+            page += 1
+        return items
+
+    def get_unanalyzed_raw(self) -> Optional[List[Dict]]:
+        """분석되지 않은 원본 데이터 조회 (fail-closed).
+
+        조회 실패 시 None을 반환한다 → 호출부는 분석을 건너뛰어 재분석을 방지한다.
+        """
         # 인증 확인
         if not self.token:
             self.authenticate()
 
-        analyzed_hashes = set(self.get_analyzed_hashes())
+        # 분석 완료된 content_hash (fail-closed)
+        analyzed_records = self._fetch_all_pages(
+            "funeral_analyzed/records", {"fields": "content_hash"}
+        )
+        if analyzed_records is None:
+            logger.error("분석본 해시 조회 실패 - 재분석 방지를 위해 분석 단계 건너뜀")
+            return None
+        analyzed_hashes = {r.get("content_hash") for r in analyzed_records}
         print(f"  [DEBUG] analyzed_hashes: {len(analyzed_hashes)}건")
 
-        # 모든 RAW 조회 (페이지네이션)
-        all_raw = []
-        page = 1
-        while True:
-            result = self._request(
-                "GET",
-                "funeral_raw/records",
-                params={"perPage": 500, "page": page}
-            )
-            if not result or not result.get("items"):
-                break
-            all_raw.extend(result["items"])
-            if page >= result.get("totalPages", 1):
-                break
-            page += 1
-
+        # 모든 RAW 조회 (fail-closed)
+        all_raw = self._fetch_all_pages("funeral_raw/records")
+        if all_raw is None:
+            logger.error("RAW 조회 실패 - 재분석 방지를 위해 분석 단계 건너뜀")
+            return None
         print(f"  [DEBUG] all_raw: {len(all_raw)}건")
 
         unanalyzed = [r for r in all_raw if r.get("content_hash") not in analyzed_hashes]
@@ -316,6 +338,7 @@ class PocketbaseClient:
                 "funeral_place": analyzed_data.get("장례장소", ""),
                 "departure_datetime": analyzed_data.get("발인일시", ""),
                 "cremation_datetime": analyzed_data.get("화장일시", ""),
+                "is_sent": False,
                 "analyzed_at": datetime.now(KST).isoformat()
             }
         )
@@ -345,36 +368,51 @@ class PocketbaseClient:
 
         return hashes
 
-    def get_unsent_analyzed(self) -> List[Dict]:
-        """전송되지 않은 분석 데이터 조회 (페이지네이션)"""
+    def get_unsent_analyzed(self) -> Optional[List[Dict]]:
+        """미전송 분석 데이터 조회 (is_sent=false 서버측 필터, fail-closed).
+
+        전송 여부의 단일 진실원천(source of truth)은 funeral_analyzed.is_sent 이다.
+        조회 실패 시 None을 반환한다 → 호출부는 전송을 건너뛰어 중복 발송을 방지한다.
+        (과거: 전체 sent 목록을 내려받아 비교 → 조회 실패 시 '전부 미전송'으로
+         오판하여 대량 재발송하는 fail-open 결함이 있었음)
+        """
         # 인증 확인
         if not self.token:
             self.authenticate()
 
-        sent_hashes = set(self.get_sent_hashes())
-        print(f"  [DEBUG] sent_hashes: {len(sent_hashes)}건")
-
-        # 모든 analyzed 조회 (페이지네이션)
-        all_analyzed = []
-        page = 1
-        while True:
-            result = self._request(
-                "GET",
-                "funeral_analyzed/records",
-                params={"perPage": 500, "page": page}
-            )
-            if not result or not result.get("items"):
-                break
-            all_analyzed.extend(result["items"])
-            if page >= result.get("totalPages", 1):
-                break
-            page += 1
-
-        print(f"  [DEBUG] all_analyzed: {len(all_analyzed)}건")
-        unsent = [r for r in all_analyzed if r.get("content_hash") not in sent_hashes]
-        print(f"  [DEBUG] unsent: {len(unsent)}건")
-
+        unsent = self._fetch_all_pages(
+            "funeral_analyzed/records", {"filter": "is_sent=false"}
+        )
+        if unsent is None:
+            logger.error("미전송 목록 조회 실패 - 중복 발송 방지를 위해 전송 단계 건너뜀")
+            return None
+        print(f"  [DEBUG] unsent(is_sent=false): {len(unsent)}건")
         return unsent
+
+    def mark_analyzed_sent(self, analyzed_id: str) -> Optional[Dict]:
+        """분석 레코드를 전송완료로 표시 (is_sent=true). 전송 dedup의 단일 진실원천."""
+        return self._request(
+            "PATCH",
+            f"funeral_analyzed/records/{analyzed_id}",
+            data={"is_sent": True}
+        )
+
+    def mark_analyzed_sent_by_hash(self, content_hash: str) -> int:
+        """content_hash로 분석 레코드를 찾아 전송완료(is_sent=true) 표시.
+        반환: 갱신된 레코드 수 (마이그레이션 등 id를 모를 때 사용)
+        """
+        result = self._request(
+            "GET",
+            "funeral_analyzed/records",
+            params={"filter": f'content_hash="{content_hash}"', "fields": "id"}
+        )
+        if not result:
+            return 0
+        updated = 0
+        for rec in result.get("items", []):
+            if self.mark_analyzed_sent(rec["id"]):
+                updated += 1
+        return updated
 
     def mark_as_sent(self, content_hash: str) -> Optional[Dict]:
         """전송 완료 기록"""

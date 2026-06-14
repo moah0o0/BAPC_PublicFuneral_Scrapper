@@ -159,6 +159,10 @@ class Pipeline:
     def _analyze_raw_data(self):
         """2단계: GPT 분석"""
         unanalyzed = self.db.get_unanalyzed_raw()
+        if unanalyzed is None:
+            # 조회 실패(fail-closed): 재분석 방지를 위해 이번 회차 분석 건너뜀
+            self._log_general("⚠️ 미분석 목록 조회 실패 - 이번 회차 분석 단계 건너뜀")
+            return
         analyze_summary = {}  # 구청별 분석 결과
         total_count = len(unanalyzed)
 
@@ -210,6 +214,10 @@ class Pipeline:
     def _send_analyzed_data(self):
         """3단계: 텔레그램 전송"""
         unsent = self.db.get_unsent_analyzed()
+        if unsent is None:
+            # 조회 실패(fail-closed): 중복 발송 방지를 위해 이번 회차 전송 건너뜀
+            self._log_general("⚠️ 미전송 목록 조회 실패 - 이번 회차 전송 단계 건너뜀 (중복 발송 방지)")
+            return
         send_summary = {}  # 구청별 전송 결과
 
         for item in unsent:
@@ -236,7 +244,9 @@ class Pipeline:
                 )
 
                 if success:
-                    # 전송 완료 기록
+                    # 전송 완료 기록 (단일 진실원천: analyzed.is_sent)
+                    self.db.mark_analyzed_sent(item["id"])
+                    # funeral_sent 는 감사(audit) 로그로만 유지 (best-effort)
                     self.db.mark_as_sent(item["content_hash"])
 
                     # 구청별 카운트
