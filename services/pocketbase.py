@@ -4,6 +4,7 @@ DB 작업 추상화
 """
 
 import hashlib
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Callable, Dict, List, Optional, Any
 import logging
@@ -138,31 +139,21 @@ class PocketbaseClient:
     # ==================== funeral_raw ====================
 
     def get_raw_by_district(self, district: str) -> List[Dict]:
-        """구청별 원본 데이터 조회 (페이지네이션)"""
-        # 인증 확인
+        """구청별 원본 데이터 조회 (페이지네이션, fail-closed).
+
+        조회 실패 시 예외를 던진다. 과거에는 실패 시 빈/부분 목록을 반환해
+        이미 수집한 글을 '새 글'로 오판 → 재저장 → 재분석 → 재발송하는
+        fail-open 결함이 있었다 (2026-11-03, 11-05 수영구 옛 부고 재발송).
+        """
         if not self.token:
             self.authenticate()
 
-        items = []
-        page = 1
-        while True:
-            result = self._request(
-                "GET",
-                "funeral_raw/records",
-                params={
-                    "filter": f'district="{district}"',
-                    "sort": "-scraped_at",
-                    "perPage": 500,
-                    "page": page
-                }
-            )
-            if not result or not result.get("items"):
-                break
-            items.extend(result["items"])
-            if page >= result.get("totalPages", 1):
-                break
-            page += 1
-
+        items = self._fetch_all_pages(
+            "funeral_raw/records",
+            {"filter": f'district="{district}"', "sort": "-scraped_at"}
+        )
+        if items is None:
+            raise RuntimeError(f"{district} 기존 RAW 조회 실패(fail-closed) - 중복 저장 방지를 위해 이번 회차 건너뜀")
         return items
 
     def get_raw_urls_by_district(self, district: str) -> List[str]:
@@ -293,8 +284,8 @@ class PocketbaseClient:
 
         return unanalyzed
 
-    def analyzed_exists(self, content_hash: str) -> bool:
-        """분석 결과 존재 여부 확인"""
+    def analyzed_exists(self, content_hash: str) -> Optional[bool]:
+        """분석 결과 존재 여부 확인. 조회 실패 시 None (호출부는 '없음'으로 오인하지 말 것)"""
         result = self._request(
             "GET",
             "funeral_analyzed/records",
@@ -303,7 +294,9 @@ class PocketbaseClient:
                 "fields": "id"
             }
         )
-        return bool(result and result.get("items"))
+        if result is None:
+            return None
+        return bool(result.get("items"))
 
     def add_analyzed(
         self,
@@ -315,8 +308,11 @@ class PocketbaseClient:
         analyzed_data: Dict[str, Any]
     ) -> Optional[Dict]:
         """분석 결과 추가 (이미 존재하면 스킵)"""
-        # 이미 존재하는지 확인
-        if self.analyzed_exists(content_hash):
+        # 이미 존재하는지 확인 (조회 실패 시 저장하지 않음 → 다음 회차 재시도)
+        exists = self.analyzed_exists(content_hash)
+        if exists is None:
+            raise RuntimeError(f"분석본 존재 확인 실패(fail-closed): {content_hash[:16]}...")
+        if exists:
             logger.debug(f"분석 결과 이미 존재: {content_hash[:16]}...")
             return {"skipped": True, "content_hash": content_hash}
 
@@ -388,6 +384,68 @@ class PocketbaseClient:
             return None
         print(f"  [DEBUG] unsent(is_sent=false): {len(unsent)}건")
         return unsent
+
+    @staticmethod
+    def _normalize_content(text: str) -> str:
+        """본문 비교용 정규화 (공백·nbsp 차이 무시)"""
+        return re.sub(r"\s+", "", (text or "").replace("\xa0", " "))
+
+    def find_already_sent_same_notice(self, item: Dict) -> Optional[bool]:
+        """같은 구청에서 '원문 본문이 같은' 부고가 이미 발송됐는지 확인 (URL/해시 무관).
+
+        구청 사이트가 같은 글을 매번 다른 URL로 노출하면(예: 수영구는
+        /board/, /library/board/, /lll/board/ ... 처럼 경로가 계속 바뀜)
+        content_hash(=url+본문)가 달라져 옛 부고가 '새 부고'로 보인다.
+        GPT 분석 결과는 회차마다 표기가 달라지므로 비교 기준으로 쓰지 않고,
+        결정적인 원문 본문으로 비교한다.
+
+        반환: True(이미 발송) / False(없음) / None(조회 실패 → 호출부는 발송 보류)
+        """
+        raw_id = item.get("raw_id")
+        district = item.get("district", "")
+        if not raw_id:
+            return False
+
+        raw = self._request("GET", f"funeral_raw/records/{raw_id}")
+        if raw is None:
+            return None
+        target = self._normalize_content(raw.get("content", ""))
+        if not target:
+            return False
+
+        def esc(v: str) -> str:
+            return str(v or "").replace("\\", "\\\\").replace('"', '\\"')
+
+        others = self._fetch_all_pages(
+            "funeral_raw/records",
+            {"filter": f'district="{esc(district)}"', "fields": "id,content_hash,content"}
+        )
+        if others is None:
+            return None
+        same_hashes = sorted({
+            o.get("content_hash") for o in others
+            if o.get("id") != raw_id
+            and o.get("content_hash")
+            and o.get("content_hash") != item.get("content_hash")
+            and self._normalize_content(o.get("content", "")) == target
+        })
+        if not same_hashes:
+            return False
+
+        # 같은 본문의 다른 해시 중 이미 발송된 분석본이 있는지 (필터 길이 제한 대비 분할 조회)
+        for i in range(0, len(same_hashes), 20):
+            chunk = same_hashes[i:i + 20]
+            cond = " || ".join(f'content_hash="{h}"' for h in chunk)
+            result = self._request(
+                "GET",
+                "funeral_analyzed/records",
+                params={"filter": f"is_sent=true && ({cond})", "fields": "id", "perPage": 1}
+            )
+            if result is None:
+                return None
+            if result.get("items"):
+                return True
+        return False
 
     def mark_analyzed_sent(self, analyzed_id: str) -> Optional[Dict]:
         """분석 레코드를 전송완료로 표시 (is_sent=true). 전송 dedup의 단일 진실원천."""

@@ -222,6 +222,18 @@ class Pipeline:
 
         for item in unsent:
             try:
+                # 안전장치: 같은 내용의 부고가 이미 발송됐으면 건너뜀 (URL 변동 대비)
+                already = self.db.find_already_sent_same_notice(item)
+                if already is None:
+                    # 조회 실패(fail-closed): 이번 회차엔 보내지 않고 다음 회차에 재확인
+                    continue
+                if already:
+                    self.db.mark_analyzed_sent(item["id"])
+                    self._log_general(
+                        f"⏭️ 이미 발송된 부고와 내용 동일 - 재발송 생략 ({item['district']} {item.get('name', '')})"
+                    )
+                    continue
+
                 # 분석 데이터 정리
                 cleaned = clean_analyzed_data({"content": {
                     "이름": item.get("name", ""),
