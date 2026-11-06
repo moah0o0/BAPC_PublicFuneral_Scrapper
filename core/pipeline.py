@@ -219,6 +219,7 @@ class Pipeline:
             self._log_general("⚠️ 미전송 목록 조회 실패 - 이번 회차 전송 단계 건너뜀 (중복 발송 방지)")
             return
         send_summary = {}  # 구청별 전송 결과
+        deferred = {}  # 중복 확인 조회 실패로 발송 보류된 건 (구청별)
 
         for item in unsent:
             try:
@@ -226,6 +227,8 @@ class Pipeline:
                 already = self.db.find_already_sent_same_notice(item)
                 if already is None:
                     # 조회 실패(fail-closed): 이번 회차엔 보내지 않고 다음 회차에 재확인
+                    district = item.get("district", "?")
+                    deferred[district] = deferred.get(district, 0) + 1
                     continue
                 if already:
                     self.db.mark_analyzed_sent(item["id"])
@@ -272,6 +275,14 @@ class Pipeline:
                     err_msg,
                     f"type:{type(e).__name__}"
                 )
+
+        # 발송 보류 경고 (조회 실패 → 다음 회차 재시도)
+        if deferred:
+            lines = [f"{k}: {v}건" for k, v in deferred.items()]
+            self._log_general(
+                f"⚠️ 중복 확인 조회 실패로 발송 보류 {sum(deferred.values())}건 "
+                f"({', '.join(lines)}) - 다음 회차 재시도"
+            )
 
         # 전송 요약 로그
         total = sum(send_summary.values())

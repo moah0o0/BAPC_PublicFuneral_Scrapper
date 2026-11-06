@@ -203,32 +203,21 @@ class PocketbaseClient:
                 "fields": "id"
             }
         )
-        return len(result.get("items", [])) if result else 0
+        if result is None:
+            # fail-closed: 0으로 오인하면 '수정' 횟수가 틀어짐 → 해당 구 이번 회차 건너뜀
+            raise RuntimeError(f"{district} 동일 URL 수 조회 실패(fail-closed)")
+        return len(result.get("items", []))
 
     # ==================== funeral_analyzed ====================
 
     def get_analyzed_hashes(self) -> List[str]:
-        """분석 완료된 content_hash 목록 (페이지네이션)"""
-        # 인증 확인
+        """분석 완료된 content_hash 목록 (fail-closed: 조회 실패 시 예외)"""
         if not self.token:
             self.authenticate()
-
-        hashes = []
-        page = 1
-        while True:
-            result = self._request(
-                "GET",
-                "funeral_analyzed/records",
-                params={"fields": "content_hash", "perPage": 500, "page": page}
-            )
-            if not result or not result.get("items"):
-                break
-            hashes.extend([r["content_hash"] for r in result["items"]])
-            if page >= result.get("totalPages", 1):
-                break
-            page += 1
-
-        return hashes
+        items = self._fetch_all_pages("funeral_analyzed/records", {"fields": "content_hash"})
+        if items is None:
+            raise RuntimeError("분석본 해시 목록 조회 실패(fail-closed)")
+        return [r["content_hash"] for r in items]
 
     def _fetch_all_pages(self, endpoint: str, params: Optional[Dict] = None) -> Optional[List[Dict]]:
         """페이지네이션 전체 조회 (fail-closed).
@@ -342,27 +331,13 @@ class PocketbaseClient:
     # ==================== funeral_sent ====================
 
     def get_sent_hashes(self) -> List[str]:
-        """전송 완료된 content_hash 목록 (페이지네이션)"""
-        # 인증 확인
+        """전송 완료된 content_hash 목록 (fail-closed: 조회 실패 시 예외)"""
         if not self.token:
             self.authenticate()
-
-        hashes = []
-        page = 1
-        while True:
-            result = self._request(
-                "GET",
-                "funeral_sent/records",
-                params={"fields": "content_hash", "perPage": 500, "page": page}
-            )
-            if not result or not result.get("items"):
-                break
-            hashes.extend([r["content_hash"] for r in result["items"]])
-            if page >= result.get("totalPages", 1):
-                break
-            page += 1
-
-        return hashes
+        items = self._fetch_all_pages("funeral_sent/records", {"fields": "content_hash"})
+        if items is None:
+            raise RuntimeError("전송 기록 해시 목록 조회 실패(fail-closed)")
+        return [r["content_hash"] for r in items]
 
     def get_unsent_analyzed(self) -> Optional[List[Dict]]:
         """미전송 분석 데이터 조회 (is_sent=false 서버측 필터, fail-closed).
@@ -464,8 +439,8 @@ class PocketbaseClient:
             "funeral_analyzed/records",
             params={"filter": f'content_hash="{content_hash}"', "fields": "id"}
         )
-        if not result:
-            return 0
+        if result is None:
+            raise RuntimeError(f"분석본 조회 실패(fail-closed): {content_hash[:16]}...")
         updated = 0
         for rec in result.get("items", []):
             if self.mark_analyzed_sent(rec["id"]):
@@ -495,37 +470,28 @@ class PocketbaseClient:
             return False
 
     def cleanup_orphan_sent(self) -> int:
-        """고아 전송완료 레코드 정리 (analyzed에 없는 sent 삭제)"""
+        """고아 전송완료 레코드 정리 (analyzed에 없는 sent 삭제)
+
+        fail-closed: 어느 조회든 실패하면 아무것도 지우지 않고 예외.
+        (과거: analyzed 조회 실패 시 빈 목록 → 모든 sent를 '고아'로 오판해 전부 삭제할 위험)
+        """
         if not self.token:
             self.authenticate()
 
-        # 모든 analyzed content_hash 조회
         analyzed_hashes = set(self.get_analyzed_hashes())
         print(f"  [DEBUG] analyzed_hashes: {len(analyzed_hashes)}건")
 
-        # 모든 sent 레코드 조회 (페이지네이션)
-        all_sent = []
-        page = 1
-        while True:
-            result = self._request(
-                "GET",
-                "funeral_sent/records",
-                params={"perPage": 500, "page": page}
-            )
-            if not result or not result.get("items"):
-                break
-            all_sent.extend(result["items"])
-            if page >= result.get("totalPages", 1):
-                break
-            page += 1
-
+        all_sent = self._fetch_all_pages("funeral_sent/records")
+        if all_sent is None:
+            raise RuntimeError("전송 기록 조회 실패(fail-closed) - 정리 중단, 삭제 0건")
         print(f"  [DEBUG] all_sent: {len(all_sent)}건")
 
-        # 고아 레코드 찾기 (analyzed에 없는 sent)
+        if all_sent and not analyzed_hashes:
+            raise RuntimeError("분석본 0건인데 전송 기록이 존재 - 비정상 상태로 판단해 정리 중단")
+
         orphans = [s for s in all_sent if s.get("content_hash") not in analyzed_hashes]
         print(f"  [DEBUG] orphan_sent: {len(orphans)}건")
 
-        # 삭제
         deleted = 0
         for orphan in orphans:
             if self.delete_sent(orphan["id"]):
@@ -535,29 +501,18 @@ class PocketbaseClient:
         return deleted
 
     def cleanup_duplicate_sent(self) -> int:
-        """중복 전송완료 레코드 정리 (같은 content_hash에 대해 최신 1개만 유지)"""
+        """중복 전송완료 레코드 정리 (같은 content_hash에 대해 최신 1개만 유지)
+
+        fail-closed: 조회 실패(부분 목록 포함) 시 아무것도 지우지 않고 예외.
+        """
         if not self.token:
             self.authenticate()
 
-        # 모든 sent 레코드 조회 (페이지네이션)
-        all_sent = []
-        page = 1
-        while True:
-            result = self._request(
-                "GET",
-                "funeral_sent/records",
-                params={"perPage": 500, "page": page, "sort": "-sent_at"}
-            )
-            if not result or not result.get("items"):
-                break
-            all_sent.extend(result["items"])
-            if page >= result.get("totalPages", 1):
-                break
-            page += 1
-
+        all_sent = self._fetch_all_pages("funeral_sent/records", {"sort": "-sent_at"})
+        if all_sent is None:
+            raise RuntimeError("전송 기록 조회 실패(fail-closed) - 정리 중단, 삭제 0건")
         print(f"  [DEBUG] all_sent: {len(all_sent)}건")
 
-        # content_hash별로 그룹화 (최신순 정렬됨)
         seen_hashes = set()
         duplicates = []
         for sent in all_sent:
@@ -569,7 +524,6 @@ class PocketbaseClient:
 
         print(f"  [DEBUG] unique: {len(seen_hashes)}건, duplicates: {len(duplicates)}건")
 
-        # 중복 삭제
         deleted = 0
         for dup in duplicates:
             if self.delete_sent(dup["id"]):

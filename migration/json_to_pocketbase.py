@@ -80,15 +80,12 @@ def get_raw_id_mapping(db: PocketbaseClient) -> dict:
     """
     funeral_raw에서 content_hash → id 매핑 조회
     """
-    result = db._request(
-        "GET",
-        "funeral_raw/records",
-        params={"fields": "id,content_hash", "perPage": 10000}
-    )
-    if not result:
-        return {}
+    # fail-closed + 전체 페이지 조회 (단일 요청은 서버 perPage 상한에 잘릴 수 있음)
+    items = db._fetch_all_pages("funeral_raw/records", {"fields": "id,content_hash"})
+    if items is None:
+        raise RuntimeError("RAW content_hash → id 매핑 조회 실패(fail-closed)")
 
-    return {r["content_hash"]: r["id"] for r in result.get("items", [])}
+    return {r["content_hash"]: r["id"] for r in items}
 
 
 def migrate_analyzed_data(db: PocketbaseClient, base_dir: Path) -> int:
